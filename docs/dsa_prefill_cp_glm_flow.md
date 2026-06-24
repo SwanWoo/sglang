@@ -1,7 +1,7 @@
 > SGLang DSA Prefill Context Parallel 完整流程（GLM 5.2 DSA）
 >
 > **适用模型**：GLM 5.2 DSA（`GlmMoeDsaForCausalLM`，[glm4_moe.py:1481](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/glm4_moe.py#L1481)）。
-> 该类继承 `DeepseekV2ForCausalLM`，**走 V2 代码路径**（`deepseek_v2.py`），MoE 层为 `DeepseekV2MoE`（[deepseek_v2.py:1029](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_v2.py#L1029)），
+> 该类继承 `DeepseekV2ForCausalLM`，**走 V2 代码路径**（`deepseek_v2.py`），MoE 层为 `DeepseekV2MoE`（[deepseek_v2.py:511](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_v2.py#L511)），
 > 不是非 DSA 的 `Glm4MoeSparseMoeBlock`。本文只讲 GLM 5.2 DSA 路径，不含 DeepSeek V4。
 >
 > **两种 split 模式**（[server_args.py:1861-1875](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L1861-L1875)）：
@@ -382,7 +382,7 @@ sequenceDiagram
 
 - `attn_cp_size = 8`，要求 `tp_size % attn_cp_size == 0` 且 `tp_size % (dp_size * attn_cp_size) == 0`
 - `enable_dsa_prefill_context_parallel = True`（字段 [server_args.py:803](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L803)）
-- `dsa_prefill_cp_mode ∈ ["in-seq-split", "round-robin-split"]`（[server_args.py:275](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L275)）
+- `dsa_prefill_cp_mode ∈ ["in-seq-split", "round-robin-split"]`（choices 常量 [server_args.py:275](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L275)，字段定义 [server_args.py:804](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L804)）
 - `enable_prefill_context_parallel` 与 `enable_dsa_prefill_context_parallel` 互斥
 
 ##### 0a. 模式自动配置（关键差异）
@@ -424,7 +424,7 @@ attn_tp_size = tp_size // attn_cp_size // attn_dp_size = 8 // 8 // 1 = 1   # att
 
 模式在**启动时定死、请求时只读**，不在请求路径上重新决策：
 
-1. **CLI 解析** → `ServerArgs` 字段 `dsa_prefill_cp_mode`（[server_args.py:275](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L275)）赋值 `"round-robin-split"` / `"in-seq-split"`。
+1. **CLI 解析** → `ServerArgs` 字段 `dsa_prefill_cp_mode`（[server_args.py:804](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L804)，choices 见常量 [server_args.py:275](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L275)）赋值 `"round-robin-split"` / `"in-seq-split"`。
 2. **`__post_init__` + 0a 派生** → mode 与 MoE 后端绑定死（in-seq 强制 `moe_a2a_backend="deepep"`/`ep_size=tp_size`；round-robin 不强制），不可解耦。
 3. **写进进程级单例**：scheduler 进程在 `ModelRunner.__init__` 调 `set_global_server_args_for_scheduler(server_args)`（[model_runner.py:512](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/model_executor/model_runner.py#L512)），tokenizer 进程调 `set_global_server_args_for_tokenizer`（[tokenizer_manager.py:253](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/tokenizer_manager.py#L253)，实为同一函数别名，[server_args.py:7896](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L7896)）。二者都赋值模块级变量 `_global_server_args`（[server_args.py:7888-7903](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L7888-L7903)），进程内常驻：
    ```python
@@ -469,7 +469,7 @@ def is_dsa_prefill_cp_round_robin_split():
 
 > 注意 MLP 那一行：in-seq 模式在 0a 强制把 `moe_a2a_backend="deepep"`，所以 `_compute_mlp_mode()` 判的是 **`moe_a2a_backend`**（间接由 mode 决定），而非直接判 `dsa_prefill_cp_mode`。其余 6 处都直接读 mode helper。
 
-> **▶ in-seq-split 限制**：`batch_size == 1`（单序列 extend），不支持 FP8 KV cache（TODO，[server_args.py:1862](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L1862)）。round-robin-split 无此约束，支持 multi-batch。
+> **▶ in-seq-split 限制**：`batch_size == 1`（单序列 extend，根因见 Step 3a，`PrefillAdder.add_one_req` 在组 batch 阶段拦截；启动期 `logger.warning` 亦提示，[server_args.py:1868](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L1868)）；不支持 FP8 KV cache 等（TODO，[server_args.py:1862](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/server_args.py#L1862)）。round-robin-split 无此约束，支持 multi-batch。
 
 每个 `TpModelWorker` 通过 `get_attention_cp_rank()`（[dp_attention.py:338](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/dp_attention.py#L338)）/ `get_attention_cp_size()`（[dp_attention.py:342](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/dp_attention.py#L342)）获取 CP rank（0~7）与 CP size（8）。
 
@@ -508,7 +508,29 @@ if obj.is_single:
 
 #### Step 3: Scheduler 组 Batch
 
-`_get_new_batch_prefill_raw()`（[scheduler.py:2553](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler.py#L2553)）从 `waiting_queue` 取请求，`PrefillAdder.add_one_req()`（[schedule_policy.py:845](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L845)）判断能否加入 batch。`PrefillAdder.__init__` 读一次全局单例缓存字段 `self.dsa_prefill_cp_in_seq_split = is_dsa_prefill_cp_in_seq_split()`（[schedule_policy.py:489](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L489)），组 batch 时检查 `can_run_list` 长度：
+`get_next_batch_to_run()`（[scheduler.py:2405](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler.py#L2405)）每轮调度先合并上一轮 prefill 残留到 `running_batch`，再调 `get_new_batch_prefill()`（[scheduler.py:2533](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler.py#L2533)）→ `_get_new_batch_prefill_raw()`（[scheduler.py:2553](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler.py#L2553)）从 `waiting_queue` 贪心装填新 prefill batch。batch size 即 `can_run_list` 最终长度，由 `PrefillAdder.add_one_req()`（[schedule_policy.py:845](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L845)）逐个请求裁定：能装就 append 进 `can_run_list`，装不动就 break。**两类上限任一耗尽即停**。
+
+**请求数上限**（`waiting_queue` 循环 [scheduler.py:2649](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler.py#L2649)，每加一个 req 前查）：
+
+| 上限 | 来源 | 超了动作 |
+|------|------|----------|
+| `get_num_allocatable_reqs` | `pp_max_micro_batch_size - running_bs`，clamp 到 `req_to_token_pool.available_size()`（[scheduler.py:2528](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler.py#L2528)） | `batch_is_full=True` |
+| `prefill_max_requests` | `--prefill-max-requests`，`add_one_req` 头部 `len(can_run_list) >= x`（[schedule_policy.py:863](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L863)） | 返回 `OTHER` |
+| DSA in-seq CP | `is_dsa_prefill_cp_in_seq_split() and len(can_run_list) >= 1`（[schedule_policy.py:860](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L860)） | 返回 `OTHER`（见下文 + 3a） |
+
+**token 预算上限**（每加一个 req，`_update_prefill_budget`（[schedule_policy.py:600](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L600)）扣 `extend_input_len + max_new_tokens + page_size`，[schedule_policy.py:612](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L612)，`ceil_paged_tokens` 按 page 对齐）：
+
+| 预算 | 含义 | 耗尽返回 |
+|------|------|----------|
+| `rem_total_tokens`（[schedule_policy.py:515](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L515)） | KV pool available + evictable − running req 占用 | `NO_TOKEN`（KV 满，设 `batch_is_full`） |
+| `rem_input_tokens`（[schedule_policy.py:588](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L588)） | `max_prefill_tokens` 每轮上限 | `OTHER` |
+| `rem_chunk_tokens`（[schedule_policy.py:595](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L595)） | `chunked_prefill_size` 每轮 chunk 上限 | `OTHER` |
+
+`budget_state()`（[schedule_policy.py:581](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L581)）汇总上述剩余。特例：`can_run_list` 空时第一个 req 强制接收（[schedule_policy.py:896](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L896)，注释 "always accept the first prefill request"），避免队列饿死。
+
+> 一句话：prefill batch size = `waiting_queue` 顺序贪心装，直到请求数 cap（`max_running_requests` / `prefill_max_requests` / `pp_max_micro_batch_size` / DSA in-seq bs=1）或 token 预算 cap（`max_prefill_tokens` / `chunked_prefill_size` / KV pool）之一耗尽。
+
+DSA in-seq 的 `bs=1` 即其中一项请求数上限。`PrefillAdder.__init__` 读一次全局单例缓存字段 `self.dsa_prefill_cp_in_seq_split = is_dsa_prefill_cp_in_seq_split()`（[schedule_policy.py:489](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L489)），组 batch 时检查 `can_run_list` 长度：
 
 ```python
 # schedule_policy.py:857-861
@@ -521,6 +543,8 @@ if (self.dsa_prefill_cp_in_seq_split) and len(self.can_run_list) >= 1:
 
 - **▶ round-robin-split**：支持 multi-batch，`PrefillAdder` 可加多个请求
 - **▶ in-seq-split**：强制 `batch_size == 1`（[schedule_policy.py:845-861](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_policy.py#L845-L861)），第 2 个起被拒（zigzag prev/next 分段 topk 的多 batch 支持有精度问题，[dsa_indexer.py:1497](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L1497) `# TODO support mutil-batch`）
+
+组好 batch 后，`prepare_for_extend()`（[schedule_batch.py:1823](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_batch.py#L1823)）设置 `forward_mode = ForwardMode.EXTEND`，构建 `input_ids` / `extend_seq_lens` 等 tensor，交给 event_loop 起 forward（见 Step 4）。
 
 ##### 3a. 为什么 in-seq 必须 bs=1（根因）
 
@@ -547,11 +571,9 @@ in-seq 把每 rank 的 Q 按 zigzag 分 **prev / next 两段**分别做 sparse t
 
 注释 `# TODO prev, next, combined into a single call`（[dsa_indexer.py:1500](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L1500)）也表明 prev/next 两次 topk 调用本应合并处理多 seq，目前未做。
 
-**对比 round-robin**：不分 prev/next，整段 Q 走单路径 `_get_topk_ragged`（[dsa_indexer.py:509](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L509)），多 seq 自然聚合到 ragged offset，无分段边界问题 → multi-batch 无碍。
+**对比 round-robin**：不分 prev/next，整段 Q 走单路径 `_get_topk_ragged`（[dsa_indexer.py:733](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L733)，内部 CP 分支也调 `cp_all_gather_rerange_output`，[:1721](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L1721)），多 seq 自然聚合到 ragged offset，无分段边界问题 → multi-batch 无碍。
 
 > 结论：bs=1 不是调度层的任意限制，是 in-seq zigzag 分段 topk 的**消费侧多 batch 逻辑未实现**的硬约束。metadata 已备多 seq 数据，但 indexer 消费侧（`[0]` 取值 + Q 对半切）只认单 seq，故 Scheduler 在组 batch 阶段提前拦截，避免 forward 时精度出错。
-
-`prepare_for_extend()`（[schedule_batch.py:1823](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/schedule_batch.py#L1823)）设置 `forward_mode = ForwardMode.EXTEND`，构建 `input_ids` / `extend_seq_lens` 等 tensor。
 
 ---
 
@@ -759,6 +781,8 @@ for bs, cur_len in enumerate(extend_seqs):
 
 `DeepseekV2AttentionMLA`（[deepseek_v2.py:1425](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_v2.py#L1425)）。CP 初始化（[deepseek_v2.py:1469-1477](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_v2.py#L1469-L1477)）保存 `cp_size`，不强制 TP=1（但 `get_attention_tp_size()` 在 CP 启用时返回 1）。
 
+**前置：每卡 Q/KV 怎么来（gather 前）**。Step 5 split 的不只是 `hidden_states`，`cp_split_and_rebuild_position()`（[cp_utils.py:167](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/utils/cp_utils.py#L167)）对 `position_ids` 做同样 split——每卡持自己 8 个 token 的 hidden + 8 个 position。本层 attention 用这 8 个 hidden + 8 个 position 经 `fused_qkv_a_proj_with_mqa`（[deepseek_v2.py:1871](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_v2.py#L1871)）算出**本卡 8 个 token 的 Q / k_nope / k_pe**。即 gather 前每卡 KV 只有 8 个（对应自己那 8 token），Q 也只有 8 个。attention 要求每个 Q 看到全部 64 KV，故需 KV AllGather。
+
 **KV AllGather**（CP 关键）：MLA forward 路径（[forward_mla.py:384-388](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py#L384-L388)）：
 
 ```python
@@ -781,9 +805,28 @@ k_pe = latent_cache_output[..., self.kv_lora_rank:].unsqueeze(1)
 
 - **▶ round-robin-split**（[cp_utils.py:341-358](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/utils/cp_utils.py#L341-L358)）：NCCL AllGather 后简单 `view(cp_size, -1, ...).transpose(0,1).reshape(...)` 三步矩阵变换恢复顺序：
   ```
-  AllGather: [rank0: t0,t8,..,t56 | rank1: t1,t9,..,t57 | ... | rank7: t7,..,t63]
-  view(8,8,...).transpose(0,1).reshape(64,...) → [t0,t1,t2,...,t63]  ✓ 正序
+  gather 前每卡持自己 8 token 的 KV latent（Step 5 stride 切片分到的）:
+    rank0: [t0,t8,t16,t24,t32,t40,t48,t56]   rank1: [t1,t9,...,t57]   ...   rank7: [t7,...,t63]
+
+  AllGather 按 rank 顺序拼接 → [64, ...]:
+    [rank0 的 8 | rank1 的 8 | ... | rank7 的 8]
+    = [t0,t8,..,t56,  t1,t9,..,t57,  ...,  t7,..,t63]
+
+  view(8, 8, ...) 把上面看成 [8 rank, 8 token]:
+       rank0 → t0  t8  t16 t24 t32 t40 t48 t56
+       rank1 → t1  t9  t17 t25 t33 t41 t49 t57
+       ...
+       rank7 → t7  t15 t23 t31 t39 t47 t55 t63
+
+  transpose(0,1) → 按列读:
+       t0 t1 t2 t3 t4 t5 t6 t7   (第 0 列 = 各 rank 第 0 token)
+       t8 t9 ...
+       ...
+       t56 ... t63
+
+  reshape(64) → [t0,t1,t2,...,t63]  ✓ 正序（stride 切片的逆操作）
   ```
+  注意 MLA gather 的是 latent（`kv_lora_rank` + pe_dim），不是展开的 K/V；rerange 后再拆回 `k_nope` / `k_pe` 各 [64, ...]。
 
 - **▶ in-seq-split**（[cp_utils.py:360-378](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/utils/cp_utils.py#L360-L378)）：`cp_all_gather_reorganized_into_tensor`（[cp_utils.py:215](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/utils/cp_utils.py#L215)，AllGather + pad/截取）→ 按 `reverse_split_len` 切段 → 按 `cp_reverse_index` 重排段：
   ```
@@ -796,7 +839,7 @@ k_pe = latent_cache_output[..., self.kv_lora_rank:].unsqueeze(1)
 
 **DSA Indexer**（稀疏 attention 索引，[dsa_indexer.py:1484](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L1484)）：
 
-- **▶ round-robin-split**：走正常 `_get_topk_ragged` 路径（内部也调 `cp_all_gather_rerange_output`，[dsa_indexer.py:509](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L509)/[:523](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L523)），不分 prev/next
+- **▶ round-robin-split**：走正常 `_get_topk_ragged` 路径（[dsa_indexer.py:733](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L733)，其 KV gather 在 `_get_q_k_bf16` 调 `cp_all_gather_rerange_output`，[dsa_indexer.py:509](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L509)/[:523](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L523)），不分 prev/next
 - **▶ in-seq-split**：把本 rank Q 按 prev/next 分两段分别 topk（[dsa_indexer.py:1501-1526](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/attention/dsa/dsa_indexer.py#L1501-L1526)）：
   ```python
   q_fp8_prev, q_fp8_next = torch.split(q_fp8, (q_fp8.shape[0]+1)//2, dim=0)
@@ -843,7 +886,7 @@ def dsa_cp_gather_hidden_states(hidden_states):
 
 ##### 6d. MoE 计算
 
-`self.mlp` 是 `DeepseekV2MoE`（[deepseek_v2.py:1029](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_v2.py#L1029)）。`use_reduce_scatter=True` 使 `should_skip_post_experts_all_reduce()`（[moe/utils.py:422](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/moe/utils.py#L422)）返回 True，跳过 MoE 内部 post-experts AllReduce。
+`self.mlp` 是 `DeepseekV2MoE`（[deepseek_v2.py:511](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_v2.py#L511)）。`use_reduce_scatter=True` 使 `should_skip_post_experts_all_reduce()`（[moe/utils.py:422](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/layers/moe/utils.py#L422)）返回 True，跳过 MoE 内部 post-experts AllReduce。
 
 - **▶ round-robin-split**（TP MoE，`moe_tp_size=8`）：每卡持全部 routed expert 的 1/8 权重（按 intermediate 维度 TP 切分），算 TP partial result。`self.tp_size > 1`（[deepseek_v2.py:526](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_v2.py#L526) `= get_tensor_model_parallel_world_size() = 8`）但 `should_skip_post_experts_all_reduce(use_reduce_scatter=True)` → 跳过 AllReduce（[deepseek_v2.py:1029-1034](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/models/deepseek_v2.py#L1029-L1034)），由后续 CP ReduceScatter 统一完成 TP reduce + CP scatter：
   ```python
@@ -916,7 +959,7 @@ if self.pp_group.is_last_rank:
 
 #### Step 8: 结果回传
 
-承接 Step 7：`DeepseekV2ForCausalLM.forward()` 经 `logits_processor` + 采样得 `next_token_ids`，作为 `ModelRunnerOutput` 沿调用链返回 `TpModelWorker.forward_batch_generation()` → `Scheduler.run_batch()` → `process_batch_result()`（[scheduler.py:3174](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler.py#L3174)）。prefill 走 `batch_result_processor.process_batch_result_prefill()`（[batch_result_processor.py:178](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler_components/batch_result_processor.py#L178)），把 `next_token_id` 追加到 `req.output_ids`（[:227](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler_components/batch_result_processor.py#L227)），再经 `ipc_channels.send_to_detokenizer.send_output()`（[scheduler.py:3139](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler.py#L3139)）ZMQ 发 `BatchStrOutput` 给 DetokenizerManager：
+承接 Step 7：`DeepseekV2ForCausalLM.forward()` 经 `logits_processor` + 采样得 `next_token_ids`，作为 `ModelRunnerOutput` 沿调用链返回 `TpModelWorker.forward_batch_generation()` → `Scheduler.run_batch()` → `process_batch_result()`（[scheduler.py:3174](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler.py#L3174)）。prefill 走 `batch_result_processor.process_batch_result_prefill()`（[batch_result_processor.py:178](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler_components/batch_result_processor.py#L178)），把 `next_token_id` 追加到 `req.output_ids`（[:227](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler_components/batch_result_processor.py#L227)），再经 `output_streamer.stream_output()`（[batch_result_processor.py:328](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler_components/batch_result_processor.py#L328)）→ `send_to_detokenizer.send_output()`（[output_streamer.py:168](https://github.com/sgl-project/sglang/blob/d8487bad06eb305bcb1f1efcd5d89072b15bf0ec/python/sglang/srt/managers/scheduler_components/output_streamer.py#L168)）ZMQ 发 `BatchStrOutput` 给 DetokenizerManager：
 
 1. `TpModelWorker` logits 经采样得 `next_token_ids`
 2. Scheduler 追加到 `req.output_ids`
