@@ -1588,7 +1588,7 @@ class Scheduler(
                 # truly idle, so the conservative non-urgent guard inside
                 # `_flush` finds `event.query()` True and compacts freely.
                 # Sync-free; best-effort.
-                allocator = getattr(self, "token_to_kv_pool_allocator", None)
+                allocator = self.token_to_kv_pool_allocator
                 if allocator is not None and hasattr(
                     allocator, "flush_opportunistic"
                 ):
@@ -3055,7 +3055,7 @@ class Scheduler(
                 if req is continuing_chunked:
                     continue
                 if self.is_hybrid_swa:
-                    params = getattr(req, "swa_uuid_for_lock", None)
+                    params = req.swa_uuid_for_lock
                     self.tree_cache.dec_lock_ref(req.last_node, params)
                     req.swa_uuid_for_lock = None
                 else:
@@ -3435,7 +3435,7 @@ class Scheduler(
                         if hasattr(allocator, "set_inflight_forward"):
                             allocator.set_inflight_forward(
                                 forward_done,
-                                getattr(batch, "out_cache_loc", None),
+                                batch.out_cache_loc,
                             )
                         batch_result.forward_done = forward_done
                         # FIXME(lsyin): maybe move this to forward_batch_generation
@@ -3690,7 +3690,7 @@ class Scheduler(
         if not self.is_fully_idle():
             return
 
-        allocator = getattr(self, "token_to_kv_pool_allocator", None)
+        allocator = self.token_to_kv_pool_allocator
         if allocator is not None and hasattr(allocator, "flush_opportunistic"):
             try:
                 allocator.flush_opportunistic()
